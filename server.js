@@ -16,6 +16,19 @@ const m49ToIso = Object.fromEntries(
     Object.entries(isoToM49).map(([iso, m49]) => [m49, iso])
 );
 
+// 🧠 SIMPLE CACHE
+const cache = {};
+const CACHE_DURATION = 1000 * 60 * 60 * 24; // 24 hours
+
+// ✅ Health check (fast)
+app.get("/health", (req, res) => {
+    res.json({
+        status: "ok",
+        timestamp: Date.now()
+    });
+});
+
+// 🌍 Trade partners endpoint (with caching)
 app.get('/trade-partners', async (req, res) => {
     const requestedIso = req.query.country;
     const reporterM49 = isoToM49[requestedIso];
@@ -23,6 +36,13 @@ app.get('/trade-partners', async (req, res) => {
     if (!reporterM49) {
         console.warn(`No mapping for ${requestedIso}`);
         return res.json([]);
+    }
+
+    // ⚡ 1. CHECK CACHE FIRST
+    const cached = cache[requestedIso];
+
+    if (cached && (Date.now() - cached.timestamp < CACHE_DURATION)) {
+        return res.json(cached.data);
     }
 
     try {
@@ -35,7 +55,7 @@ app.get('/trade-partners', async (req, res) => {
             return res.json([]);
         }
 
-        // ✅ Step 1: deduplicate (take MAX per country)
+        // ✅ Step 1: deduplicate
         const partnerMap = {};
 
         json.data
@@ -49,7 +69,7 @@ app.get('/trade-partners', async (req, res) => {
                 }
             });
 
-        // ✅ Step 2: compute total from CLEAN data
+        // ✅ Step 2: total
         const totalExports = Object.values(partnerMap)
             .reduce((sum, val) => sum + val, 0);
 
@@ -57,7 +77,7 @@ app.get('/trade-partners', async (req, res) => {
             return res.json([]);
         }
 
-        // ✅ Step 3: convert to %
+        // ✅ Step 3: %
         const partners = Object.entries(partnerMap)
             .map(([iso, value]) => ({
                 country: iso,
@@ -65,8 +85,11 @@ app.get('/trade-partners', async (req, res) => {
             }))
             .sort((a, b) => b.value - a.value);
 
-        console.log(`Top partners for ${requestedIso}:`);
-        console.log(partners.slice(0, 5));
+        // ⚡ 2. STORE IN CACHE
+        cache[requestedIso] = {
+            data: partners,
+            timestamp: Date.now()
+        };
 
         res.json(partners);
 

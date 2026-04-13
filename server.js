@@ -6,12 +6,12 @@ const path = require("path");
 const app = express();
 app.use(cors());
 
-// ✅ Load JSON file instead of hardcoding
+// 📦 Load ISO → M49 mapping
 const isoToM49 = JSON.parse(
     fs.readFileSync(path.join(__dirname, "isoToM49.json"), "utf-8")
 );
 
-// Reverse lookup dictionary
+// 🔁 Reverse mapping
 const m49ToIso = Object.fromEntries(
     Object.entries(isoToM49).map(([iso, m49]) => [m49, iso])
 );
@@ -21,12 +21,12 @@ app.get('/trade-partners', async (req, res) => {
     const reporterM49 = isoToM49[requestedIso];
 
     if (!reporterM49) {
-        console.warn(`No M49 mapping for ${requestedIso}`);
-        return res.json([]); 
+        console.warn(`No mapping for ${requestedIso}`);
+        return res.json([]);
     }
 
     try {
-        const url = `https://comtradeapi.un.org/public/v1/preview/C/A/HS?reporterCode=${reporterM49}&flowCode=X&cmdCode=TOTAL&period=2022`;
+        const url = `https://comtradeapi.un.org/public/v1/preview/C/A/HS?reporterCode=${reporterM49}&flowCode=X&cmdCode=TOTAL&period=2021`;
 
         const response = await fetch(url);
         const json = await response.json();
@@ -35,23 +35,40 @@ app.get('/trade-partners', async (req, res) => {
             return res.json([]);
         }
 
-        const topPartners = json.data
+        // ✅ Step 1: deduplicate (take MAX per country)
+        const partnerMap = {};
+
+        json.data
             .filter(item => item.partnerCode !== 0)
-            .map(item => ({
-                m49: item.partnerCode,
-                iso: m49ToIso[item.partnerCode],
-                value: item.primaryValue
+            .forEach(item => {
+                const iso = m49ToIso[item.partnerCode];
+                if (!iso) return;
+
+                if (!partnerMap[iso] || item.primaryValue > partnerMap[iso]) {
+                    partnerMap[iso] = item.primaryValue;
+                }
+            });
+
+        // ✅ Step 2: compute total from CLEAN data
+        const totalExports = Object.values(partnerMap)
+            .reduce((sum, val) => sum + val, 0);
+
+        if (totalExports === 0) {
+            return res.json([]);
+        }
+
+        // ✅ Step 3: convert to %
+        const partners = Object.entries(partnerMap)
+            .map(([iso, value]) => ({
+                country: iso,
+                value: (value / totalExports) * 100
             }))
-            .filter(item => item.iso)
-            .sort((a, b) => b.value - a.value)
-            .slice(0, 5);
+            .sort((a, b) => b.value - a.value);
 
-        const formattedResponse = topPartners.map(p => ({
-            country: p.iso,
-            value: p.value
-        }));
+        console.log(`Top partners for ${requestedIso}:`);
+        console.log(partners.slice(0, 5));
 
-        res.json(formattedResponse);
+        res.json(partners);
 
     } catch (error) {
         console.error("Error fetching Comtrade data:", error);
@@ -60,5 +77,5 @@ app.get('/trade-partners', async (req, res) => {
 });
 
 app.listen(3000, () => {
-    console.log("Server running on http://localhost:3000");
+    console.log("Server running at http://localhost:3000");
 });

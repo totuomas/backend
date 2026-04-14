@@ -1,3 +1,5 @@
+require("dotenv").config();
+
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -16,11 +18,13 @@ const m49ToIso = Object.fromEntries(
     Object.entries(isoToM49).map(([iso, m49]) => [m49, iso])
 );
 
-// 🧠 SIMPLE CACHE
-const cache = {};
-const CACHE_DURATION = 1000 * 60 * 60 * 24; // 24 hours
+// 🧠 PERSISTENT CACHE SETUP
+const CACHE_DIR = path.join(__dirname, "cache");
+if (!fs.existsSync(CACHE_DIR)) {
+    fs.mkdirSync(CACHE_DIR);
+}
 
-// ✅ Health check (fast)
+// ✅ Health check
 app.get("/health", (req, res) => {
     res.json({
         status: "ok",
@@ -28,7 +32,7 @@ app.get("/health", (req, res) => {
     });
 });
 
-// 🌍 Trade partners endpoint (with caching)
+// 🌍 Trade partners endpoint
 app.get('/trade-partners', async (req, res) => {
     const requestedIso = req.query.country;
     const reporterM49 = isoToM49[requestedIso];
@@ -38,46 +42,62 @@ app.get('/trade-partners', async (req, res) => {
         return res.json([]);
     }
 
-    // ⚡ 1. CHECK CACHE FIRST
-    const cached = cache[requestedIso];
+    const cacheFile = path.join(CACHE_DIR, `${requestedIso}_exports_2021.json`);
 
-    if (cached && (Date.now() - cached.timestamp < CACHE_DURATION)) {
-        return res.json(cached.data);
+    // ⚡ 1. Check Persistent Disk Cache First
+    if (fs.existsSync(cacheFile)) {
+        console.log(`Cache HIT for ${requestedIso}`);
+        return res.json(JSON.parse(fs.readFileSync(cacheFile, 'utf-8')));
     }
 
     try {
-        const url = `https://comtradeapi.un.org/public/v1/preview/C/A/HS?reporterCode=${reporterM49}&flowCode=X&cmdCode=TOTAL&period=2021`;
+        console.log(`Cache MISS for ${requestedIso}. Fetching from UN Comtrade...`);
+        
+        // 🚀 2. Optimized Comtrade URL
+        // Added cmdCode=TOTAL (don't send every product) & flowCode=X (only exports)
+        const url = `https://comtradeapi.un.org/data/v1/get/C/A/HS?reporterCode=${reporterM49}&period=2021&cmdCode=TOTAL&flowCode=X`;
 
-        const response = await fetch(url);
+        const response = await fetch(url, {
+            headers: {
+                "Ocp-Apim-Subscription-Key": process.env.COMTRADE_API_KEY
+            }
+        });
+
+        console.log("STATUS:", response.status);
+
         const json = await response.json();
 
         if (!json.data || !Array.isArray(json.data)) {
+            console.log("No data returned:", json);
             return res.json([]);
         }
 
-        // ✅ Step 1: deduplicate
+        // ✅ Step 1: Aggregate
         const partnerMap = {};
 
-        json.data
-            .filter(item => item.partnerCode !== 0)
-            .forEach(item => {
-                const iso = m49ToIso[item.partnerCode];
-                if (!iso) return;
+        json.data.forEach(item => {
+            if (item.partnerCode === 0) return; // 0 is "World" (total sum), skip it
 
-                if (!partnerMap[iso] || item.primaryValue > partnerMap[iso]) {
-                    partnerMap[iso] = item.primaryValue;
-                }
-            });
+            const iso = m49ToIso[item.partnerCode];
+            if (!iso) return;
 
-        // ✅ Step 2: total
+            if (!partnerMap[iso]) {
+                partnerMap[iso] = 0;
+            }
+
+            partnerMap[iso] += item.primaryValue;
+        });
+
+        // ✅ Step 2: Total
         const totalExports = Object.values(partnerMap)
             .reduce((sum, val) => sum + val, 0);
 
         if (totalExports === 0) {
+            console.log("Total exports = 0");
             return res.json([]);
         }
 
-        // ✅ Step 3: %
+        // ✅ Step 3: Percentage
         const partners = Object.entries(partnerMap)
             .map(([iso, value]) => ({
                 country: iso,
@@ -85,11 +105,8 @@ app.get('/trade-partners', async (req, res) => {
             }))
             .sort((a, b) => b.value - a.value);
 
-        // ⚡ 2. STORE IN CACHE
-        cache[requestedIso] = {
-            data: partners,
-            timestamp: Date.now()
-        };
+        // ⚡ 4. Save to Disk Cache
+        fs.writeFileSync(cacheFile, JSON.stringify(partners));
 
         res.json(partners);
 
@@ -100,5 +117,5 @@ app.get('/trade-partners', async (req, res) => {
 });
 
 app.listen(3000, () => {
-    console.log("Server running succesfully.");
+    console.log("Server running successfully.");
 });

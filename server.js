@@ -32,9 +32,10 @@ app.get("/health", (req, res) => {
     });
 });
 
-// 🌍 Trade partners endpoint
+// 🌍 Trade partners endpoint (NOW supports imports + exports)
 app.get('/trade-partners', async (req, res) => {
     const requestedIso = req.query.country;
+    const type = req.query.type || "exports"; // 👈 NEW
     const reporterM49 = isoToM49[requestedIso];
 
     if (!reporterM49) {
@@ -42,20 +43,26 @@ app.get('/trade-partners', async (req, res) => {
         return res.json([]);
     }
 
-    const cacheFile = path.join(CACHE_DIR, `${requestedIso}_exports_2021.json`);
+    // 🔁 Choose flow type
+    const flowCode = type === "imports" ? "M" : "X";
+
+    // 🧠 Separate cache for imports vs exports
+    const cacheFile = path.join(
+        CACHE_DIR,
+        `${requestedIso}_${type}_2021.json`
+    );
 
     // ⚡ 1. Check Persistent Disk Cache First
     if (fs.existsSync(cacheFile)) {
-        console.log(`Cache HIT for ${requestedIso}`);
+        console.log(`Cache HIT for ${requestedIso} (${type})`);
         return res.json(JSON.parse(fs.readFileSync(cacheFile, 'utf-8')));
     }
 
     try {
-        console.log(`Cache MISS for ${requestedIso}. Fetching from UN Comtrade...`);
+        console.log(`Cache MISS for ${requestedIso} (${type}). Fetching from UN Comtrade...`);
         
         // 🚀 2. Optimized Comtrade URL
-        // Added cmdCode=TOTAL (don't send every product) & flowCode=X (only exports)
-        const url = `https://comtradeapi.un.org/data/v1/get/C/A/HS?reporterCode=${reporterM49}&period=2021&cmdCode=TOTAL&flowCode=X`;
+        const url = `https://comtradeapi.un.org/data/v1/get/C/A/HS?reporterCode=${reporterM49}&period=2021&cmdCode=TOTAL&flowCode=${flowCode}`;
 
         const response = await fetch(url, {
             headers: {
@@ -76,7 +83,7 @@ app.get('/trade-partners', async (req, res) => {
         const partnerMap = {};
 
         json.data.forEach(item => {
-            if (item.partnerCode === 0) return; // 0 is "World" (total sum), skip it
+            if (item.partnerCode === 0) return; // skip "World"
 
             const iso = m49ToIso[item.partnerCode];
             if (!iso) return;
@@ -89,11 +96,11 @@ app.get('/trade-partners', async (req, res) => {
         });
 
         // ✅ Step 2: Total
-        const totalExports = Object.values(partnerMap)
+        const total = Object.values(partnerMap)
             .reduce((sum, val) => sum + val, 0);
 
-        if (totalExports === 0) {
-            console.log("Total exports = 0");
+        if (total === 0) {
+            console.log("Total = 0");
             return res.json([]);
         }
 
@@ -101,7 +108,7 @@ app.get('/trade-partners', async (req, res) => {
         const partners = Object.entries(partnerMap)
             .map(([iso, value]) => ({
                 country: iso,
-                value: (value / totalExports) * 100
+                value: (value / total) * 100
             }))
             .sort((a, b) => b.value - a.value);
 
